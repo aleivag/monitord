@@ -481,8 +481,10 @@ pub async fn parse_unit_state(
             }
         }
 
-        // Collect service stats
-        if config.services.contains(&unit.name) {
+        // Collect service stats (only for .service units)
+        if unit.name.ends_with(".service")
+            && crate::config::matches_service(&config.services, &unit.name)
+        {
             debug!("Collecting service stats for {:?}", &unit);
             match parse_service(connection, &unit.name, &unit.unit_object_path).await {
                 Ok(service_stats) => {

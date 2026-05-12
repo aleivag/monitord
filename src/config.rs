@@ -416,6 +416,60 @@ fn read_config_bool(config: &Ini, section: &str, key: &str) -> Result<bool, Moni
     }
 }
 
+/// Simple glob matching supporting `*` as a wildcard that matches zero or more characters.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let mut px = 0;
+    let mut tx = 0;
+    let mut next_px = 0;
+    let mut next_tx: Option<usize> = None;
+    let p = pattern.as_bytes();
+    let t = text.as_bytes();
+
+    while tx < t.len() || px < p.len() {
+        if px < p.len() {
+            match p[px] {
+                b'*' => {
+                    next_px = px;
+                    next_tx = Some(tx);
+                    px += 1;
+                    continue;
+                }
+                c if tx < t.len() && c == t[tx] => {
+                    px += 1;
+                    tx += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if let Some(nt) = next_tx {
+            if nt < t.len() {
+                px = next_px + 1;
+                next_tx = Some(nt + 1);
+                tx = nt + 1;
+                continue;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// Check whether a unit name matches any pattern in the services config.
+/// Patterns can contain `*` wildcards (e.g. `*`, `ssh*`, `*network*.service`).
+/// When no patterns contain wildcards, this falls back to an O(1) HashSet lookup.
+pub fn matches_service(services: &HashSet<String>, unit_name: &str) -> bool {
+    if services.contains(unit_name) {
+        return true;
+    }
+    for pattern in services {
+        if pattern.contains('*') && glob_match(pattern, unit_name) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Helper function to read optional bool config options while preserving field defaults
 fn read_config_optional_bool(
     config: &Ini,
@@ -662,5 +716,57 @@ output_format = json-flat
 
         let result: Result<Config, _> = ini_config.try_into();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_glob_match() {
+        assert!(glob_match("*", "sshd.service"));
+        assert!(glob_match("*", ""));
+        assert!(glob_match("ssh*", "sshd.service"));
+        assert!(glob_match("*service", "sshd.service"));
+        assert!(glob_match("*.service", "sshd.service"));
+        assert!(glob_match("*ssh*", "sshd.service"));
+        assert!(glob_match("sshd.service", "sshd.service"));
+        assert!(glob_match("ssh*.*", "sshd.service"));
+
+        assert!(!glob_match("ssh*", "chrony.service"));
+        assert!(!glob_match("*.timer", "sshd.service"));
+        assert!(!glob_match("sshd.service", "chrony.service"));
+        assert!(!glob_match("", "sshd.service"));
+    }
+
+    #[test]
+    fn test_matches_service_exact() {
+        let services = HashSet::from([String::from("sshd.service"), String::from("chrony.service")]);
+        assert!(matches_service(&services, "sshd.service"));
+        assert!(matches_service(&services, "chrony.service"));
+        assert!(!matches_service(&services, "foo.service"));
+    }
+
+    #[test]
+    fn test_matches_service_wildcard_all() {
+        let services = HashSet::from([String::from("*")]);
+        assert!(matches_service(&services, "sshd.service"));
+        assert!(matches_service(&services, "chrony.service"));
+        assert!(matches_service(&services, "anything.service"));
+    }
+
+    #[test]
+    fn test_matches_service_wildcard_pattern() {
+        let services = HashSet::from([String::from("ssh*")]);
+        assert!(matches_service(&services, "sshd.service"));
+        assert!(matches_service(&services, "ssh-agent.service"));
+        assert!(!matches_service(&services, "chrony.service"));
+    }
+
+    #[test]
+    fn test_matches_service_mixed_exact_and_wildcard() {
+        let services = HashSet::from([
+            String::from("chrony.service"),
+            String::from("ssh*"),
+        ]);
+        assert!(matches_service(&services, "sshd.service"));
+        assert!(matches_service(&services, "chrony.service"));
+        assert!(!matches_service(&services, "foo.service"));
     }
 }
